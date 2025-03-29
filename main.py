@@ -1,37 +1,50 @@
-import logging
+import requests
 import base64
-import os
+import logging
 from io import BytesIO
 from PIL import Image
-from telegram import Update, InputFile
+from telegram import Bot, Update
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from openai import OpenAI
-import asyncio
+import os
 
-# Logging configuration
+# Logging setup
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# OpenAI setup
+# Environment variables
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+IMGUR_CLIENT_ID = os.getenv("IMGUR_CLIENT_ID")
+
+# OpenAI Client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# Bot Commands
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Start command handler."""
-    await update.message.reply_text("Send me a photo, and I'll transform it into a Studio Ghibli-style image!")
+# ✅ Upload image to Imgur
+def upload_to_imgur(image_bytes):
+    url = "https://api.imgur.com/3/upload"
+    headers = {"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"}
+    response = requests.post(url, headers=headers, files={"image": image_bytes})
 
-# Convert image to Base64
-def image_to_base64(image: Image) -> str:
-    """Converts PIL Image to Base64 string."""
-    buffered = BytesIO()
-    image.save(buffered, format="JPEG")
-    img_str = base64.b64encode(buffered.getvalue()).decode("utf-8")
-    return img_str
+    if response.status_code == 200:
+        return response.json()["data"]["link"]
+    else:
+        logger.error(f"Failed to upload image: {response.text}")
+        return None
 
-# Transform image using OpenAI Vision API
-async def transform_image(image_b64: str) -> str:
-    """Transforms the image into Studio Ghibli style using GPT-4o Vision."""
+
+# ✅ Convert Telegram image to bytes
+async def get_image_bytes(bot: Bot, file_id: str):
+    new_file = await bot.get_file(file_id)
+    image_bytes = BytesIO()
+    await new_file.download_to_memory(image_bytes)
+    image_bytes.seek(0)
+    return image_bytes.getvalue()
+
+
+# ✅ Transform image with GPT-4o
+async def transform_image(image_url: str) -> str:
+    """Transforms image into Studio Ghibli style using GPT-4o Vision."""
     try:
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -40,7 +53,7 @@ async def transform_image(image_b64: str) -> str:
                     "role": "user",
                     "content": [
                         {"type": "text", "text": "Turn this image into Studio Ghibli style."},
-                        {"type": "image_url", "image_url": f"data:image/jpeg;base64,{image_b64}"}
+                        {"type": "image_url", "image_url": image_url}
                     ]
                 }
             ],
@@ -52,68 +65,54 @@ async def transform_image(image_b64: str) -> str:
             transformed_image_url = response.choices[0].message.content
             return transformed_image_url
         else:
+            logger.error("No response received from the API.")
             return None
 
     except Exception as e:
         logger.error(f"Error during image transformation: {e}")
         return None
 
-# Loading animation
-async def show_loading_animation(chat_id, context: ContextTypes.DEFAULT_TYPE):
-    """Displays a loading animation while processing."""
-    animation = ["⏳", "🔄", "⌛", "🔃"]
-    message = await context.bot.send_message(chat_id, "Processing your image... ⏳")
 
-    try:
-        for i in range(10):  # Display animation for approx. 10 seconds
-            await asyncio.sleep(1)
-            await message.edit_text(f"Processing your image... {animation[i % len(animation)]}")
-    except Exception as e:
-        logger.warning(f"Failed to update animation message: {e}")
+# ✅ Handle photo messages
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle incoming photo messages."""
+    photo = update.message.photo[-1]  # Get the highest quality image
+    image_bytes = await get_image_bytes(context.bot, photo.file_id)
 
-# Handle received image
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles image uploads and sends back the transformed image."""
-    chat_id = update.message.chat_id
+    # Upload image to Imgur
+    imgur_url = upload_to_imgur(image_bytes)
+    if not imgur_url:
+        await update.message.reply_text("Failed to upload the image.")
+        return
 
-    # Start loading animation
-    loading_task = asyncio.create_task(show_loading_animation(chat_id, context))
+    await update.message.reply_text("Image uploaded. Processing...")
 
-    try:
-        photo = update.message.photo[-1]
-        file = await context.bot.get_file(photo.file_id)
+    # Transform the image
+    transformed_url = await transform_image(imgur_url)
 
-        # Download image
-        image_data = BytesIO()
-        await file.download_to_memory(out=image_data)
+    if transformed_url:
+        await update.message.reply_photo(photo=transformed_url)
+    else:
+        await update.message.reply_text("Failed to transform the image.")
 
-        # Open the image and convert to Base64
-        image = Image.open(image_data)
-        image_b64 = image_to_base64(image)
 
-        # Transform the image
-        transformed_image_url = await transform_image(image_b64)
+# ✅ Start command handler
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Send welcome message."""
+    await update.message.reply_text("Send me a photo, and I'll transform it into a Studio Ghibli-style image!")
 
-        if transformed_image_url:
-            await context.bot.send_photo(chat_id, transformed_image_url)
-        else:
-            await update.message.reply_text("Failed to transform the image.")
 
-    except Exception as e:
-        logger.error(f"Error processing image: {e}")
-        await update.message.reply_text("Sorry, I couldn't process the image.")
-    
-    finally:
-        loading_task.cancel()  # Stop the animation
-
-# Main entry point
-def main() -> None:
+# ✅ Main bot function
+def main():
     """Start the bot."""
-    token = os.getenv("TELEGRAM_BOT_TOKEN")
-    app = ApplicationBuilder().token(token).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_image))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    logger.info("Bot started...")
+    logger.info("Bot is running...")
     app.run_polling()
+
+
+if __name__ == "__main__":
+    main()
