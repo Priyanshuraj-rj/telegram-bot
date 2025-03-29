@@ -1,7 +1,7 @@
 import os
 import logging
 import requests
-from telegram import Update
+from telegram import Update, ReplyKeyboardMarkup
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, filters
 from openai import OpenAI
 from io import BytesIO
@@ -20,9 +20,6 @@ CLOUDINARY_UPLOAD_PRESET = "ml_default"  # Cloudinary upload preset
 
 # ✅ OpenAI Client
 client = OpenAI(api_key=OPENAI_API_KEY)
-
-# ✅ User state management
-user_states = {}
 
 # ✅ Cloudinary Upload Function
 def upload_to_cloudinary(image_bytes):
@@ -46,27 +43,31 @@ def upload_to_cloudinary(image_bytes):
         return None
 
 
-# ✅ Transform Image with GPT-4o
-async def transform_image(image_url: str, prompt: str) -> str:
-    """Transforms image using GPT-4o with a provided prompt"""
+# ✅ Image-to-Image Transformation
+async def transform_image(image_url: str) -> str:
+    """Transforms image into Studio Ghibli style using GPT-4o"""
     try:
-        response = client.images.generate(
-            model="dall-e-3",
-            prompt=prompt,
-            size="1024x1024",
-            n=1,
-            image_url=image_url
+        response = client.responses.create(
+            model="gpt-4o",
+            input=[{
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": "Transform this image into Studio Ghibli anime style."},
+                    {"type": "input_image", "image_url": image_url}
+                ]
+            }]
         )
-
-        image_url = response.data[0].url
-        return image_url
+        
+        # Extract the result text or image URL
+        result = response.output_text
+        return result
     except Exception as e:
         logger.error(f"Error during image transformation: {e}")
         return None
 
 
-# ✅ Generate Image from Text with GPT-4o
-async def generate_image_from_text(prompt: str) -> str:
+# ✅ Text-to-Image Generation
+async def generate_image(prompt: str) -> str:
     """Generates an image from text using GPT-4o"""
     try:
         response = client.images.generate(
@@ -75,67 +76,47 @@ async def generate_image_from_text(prompt: str) -> str:
             size="1024x1024",
             n=1
         )
-
         image_url = response.data[0].url
         return image_url
     except Exception as e:
-        logger.error(f"Error during image generation: {e}")
+        logger.error(f"Error during text-to-image generation: {e}")
         return None
+
+
+# ✅ Regular Chat Mode
+async def chat_with_gpt(prompt: str) -> str:
+    """Handles regular chat with GPT-4o"""
+    try:
+        response = client.chat_completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}]
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logger.error(f"Error during chat: {e}")
+        return "An error occurred during chat processing."
 
 
 # ✅ /start command
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Welcome message with mode selection"""
-    await update.message.reply_text(
-        "Welcome! 🌟 Choose an option:\n"
-        "1️⃣ /text_to_image - Generate an image from text\n"
-        "2️⃣ /image_to_image - Transform an existing image"
-    )
+    """Start command with mode selection"""
+    keyboard = [
+        ["🖼️ Image-to-Image", "📝 Text-to-Image"],
+        ["💬 Chat Mode"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text("Welcome! Choose a mode:", reply_markup=reply_markup)
 
 
-# ✅ /text_to_image command
-async def text_to_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sets the bot to text-to-image mode"""
-    user_states[update.effective_chat.id] = 'text_to_image'
-    await update.message.reply_text("Send me the text prompt for the image you want to generate!")
-
-
-# ✅ /image_to_image command
-async def image_to_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Sets the bot to image-to-image mode"""
-    user_states[update.effective_chat.id] = 'image_to_image'
-    await update.message.reply_text("Send me the image you want to transform.")
-
-
-# ✅ Handle text prompts for image generation
-async def handle_text_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles text prompts for text-to-image generation"""
-    if update.effective_chat.id not in user_states or user_states[update.effective_chat.id] != 'text_to_image':
-        return
-
-    prompt = update.message.text
-    await update.message.reply_text("⏳ Generating image... Please wait.")
-
-    image_url = await generate_image_from_text(prompt)
-
-    if image_url:
-        await update.message.reply_photo(image_url, caption="✨ Here is your generated image!")
-    else:
-        await update.message.reply_text("❌ Failed to generate the image.")
-
-    del user_states[update.effective_chat.id]
-
-
-# ✅ Handle image uploads
+# ✅ Handle Image-to-Image Transformation
 async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles photo messages and processes them"""
-    if update.effective_chat.id not in user_states:
-        await update.message.reply_text("Please select /image_to_image or /text_to_image first.")
+    """Handles photo messages and transforms them"""
+    if not update.message.photo:
+        await update.message.reply_text("Please send an image.")
         return
 
-    mode = user_states[update.effective_chat.id]
+    await update.message.reply_text("⏳ Uploading and processing your image...")
 
-    # Download the image
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
 
@@ -143,61 +124,76 @@ async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     await file.download_to_memory(image_bytes)
     image_bytes.seek(0)
 
-    # Upload to Cloudinary
     image_url = upload_to_cloudinary(image_bytes)
-
     if not image_url:
         await update.message.reply_text("❌ Failed to upload the image.")
         return
 
-    if mode == 'image_to_image':
-        await update.message.reply_text("✅ Image uploaded! Now, send me the text prompt for the transformation.")
-        user_states[update.effective_chat.id] = {'mode': 'image_to_image', 'image_url': image_url}
-    else:
-        await update.message.reply_text("❌ Please use /image_to_image before sending an image.")
-
-
-# ✅ Handle image transformation prompts
-async def handle_transformation_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handles transformation prompts after image upload"""
-    chat_id = update.effective_chat.id
-
-    if chat_id not in user_states or not isinstance(user_states[chat_id], dict):
-        await update.message.reply_text("❌ Please upload an image first.")
-        return
-
-    data = user_states[chat_id]
-    image_url = data['image_url']
-    prompt = update.message.text
-
-    await update.message.reply_text("⏳ Transforming image... Please wait.")
-
-    # Perform the image transformation
-    transformed_image_url = await transform_image(image_url, prompt)
-
-    if transformed_image_url:
-        await update.message.reply_photo(transformed_image_url, caption="✨ Here is your transformed image!")
+    transformed_url = await transform_image(image_url)
+    
+    if transformed_url:
+        await update.message.reply_text(f"✨ Here is your Studio Ghibli-style image: {transformed_url}")
     else:
         await update.message.reply_text("❌ Failed to transform the image.")
+    
+    await ask_for_another_mode(update)
 
-    del user_states[chat_id]
+
+# ✅ Handle Text-to-Image Generation
+async def handle_text_to_image(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles text-to-image generation"""
+    prompt = update.message.text
+
+    await update.message.reply_text("⏳ Generating image...")
+
+    image_url = await generate_image(prompt)
+
+    if image_url:
+        await update.message.reply_photo(photo=image_url, caption="✨ Here is your generated image!")
+    else:
+        await update.message.reply_text("❌ Failed to generate the image.")
+    
+    await ask_for_another_mode(update)
+
+
+# ✅ Handle Regular Chat Mode
+async def handle_chat(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Handles regular chat interaction"""
+    prompt = update.message.text
+    await update.message.reply_text("💬 Thinking...")
+
+    response = await chat_with_gpt(prompt)
+
+    await update.message.reply_text(response)
+    await ask_for_another_mode(update)
+
+
+# ✅ Ask for another mode or continue chat
+async def ask_for_another_mode(update: Update):
+    """Prompt the user to try another mode"""
+    keyboard = [
+        ["🖼️ Image-to-Image", "📝 Text-to-Image"],
+        ["💬 Chat Mode", "❌ Exit"]
+    ]
+    reply_markup = ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
+    await update.message.reply_text("✨ Would you like to try another mode or continue chatting?", reply_markup=reply_markup)
 
 
 # ✅ Main function
 def main():
     app = ApplicationBuilder().token(TOKEN).build()
-
+    
     # Handlers
     app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("text_to_image", text_to_image))
-    app.add_handler(CommandHandler("image_to_image", image_to_image))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_prompt))
+    
     app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_transformation_prompt))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("📝 Text-to-Image"), lambda u, c: u.message.reply_text("Send a text prompt for image generation.")))
+    app.add_handler(MessageHandler(filters.TEXT & filters.Regex("💬 Chat Mode"), lambda u, c: u.message.reply_text("Chat mode activated. Send me a message.")))
+    app.add_handler(MessageHandler(filters.TEXT, handle_text_to_image))
+    app.add_handler(MessageHandler(filters.TEXT, handle_chat))
 
     logger.info("Bot started...")
     app.run_polling()
-
 
 # ✅ Start the bot
 if __name__ == "__main__":
