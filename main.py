@@ -2,70 +2,69 @@ import os
 import logging
 from io import BytesIO
 from PIL import Image
+import base64
 import requests
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
-import openai
+from openai import OpenAI
 
-# Configure logging
+# Logging configuration
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Retrieve API keys from environment variables
+# Environment variables
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
 OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-# Initialize OpenAI API
-openai.api_key = OPENAI_API_KEY
+# Initialize OpenAI client
+client = OpenAI(api_key=OPENAI_API_KEY)
 
 async def start(update: Update, context: CallbackContext) -> None:
-    """Send a welcome message when the /start command is issued."""
-    await update.message.reply_text(
-        "Welcome! Send me a photo, and I'll transform it into a Studio Ghibli-style image."
-    )
+    """Welcome message"""
+    await update.message.reply_text("Send me a photo, and I'll transform it into a Studio Ghibli-style image!")
 
 async def handle_photo(update: Update, context: CallbackContext) -> None:
-    """Handle incoming photos from users."""
+    """Handles photos sent by the user."""
     photo = update.message.photo[-1]
     file = await context.bot.get_file(photo.file_id)
     image_stream = BytesIO()
     await file.download_to_memory(image_stream)
     image_stream.seek(0)
 
+    # Convert image to Base64
+    image_b64 = base64.b64encode(image_stream.getvalue()).decode('utf-8')
+    
     # Process the image
-    transformed_image_stream = await transform_image(image_stream)
+    transformed_image_url = await transform_image(image_b64)
 
-    if transformed_image_stream:
-        # Send the transformed image back to the user
-        transformed_image_stream.seek(0)
-        await update.message.reply_photo(photo=transformed_image_stream)
+    if transformed_image_url:
+        await update.message.reply_photo(photo=transformed_image_url)
     else:
-        await update.message.reply_text("Sorry, I couldn't process the image.")
+        await update.message.reply_text("Failed to transform the image.")
 
-async def transform_image(image_stream: BytesIO) -> BytesIO:
-    """Transform the image using OpenAI's API to achieve a Studio Ghibli style."""
+async def transform_image(image_b64: str) -> str:
+    """Transforms the image using GPT-4o image processing."""
     try:
-        # Prepare the image for OpenAI API
-        image = Image.open(image_stream)
-        buffered = BytesIO()
-        image.save(buffered, format="PNG")
-        buffered.seek(0)
-
-        # Call OpenAI API for image transformation
-        response = openai.Image.create_variation(
-            image=buffered,
-            n=1,
-            size="1024x1024"
+        response = client.responses.create(
+            model="gpt-4o",
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Transform this into Studio Ghibli style"},
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/png;base64,{image_b64}",
+                            "detail": "high"
+                        }
+                    ]
+                }
+            ]
         )
 
-        # Retrieve the transformed image URL
-        transformed_image_url = response['data'][0]['url']
-
-        # Download the transformed image
-        transformed_image_response = requests.get(transformed_image_url)
-        transformed_image_stream = BytesIO(transformed_image_response.content)
-
-        return transformed_image_stream
+        # Get the transformed image URL
+        transformed_image_url = response.output_text  # URL of the processed image
+        return transformed_image_url
 
     except Exception as e:
         logger.error(f"Error during image transformation: {e}")
