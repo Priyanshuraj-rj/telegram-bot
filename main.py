@@ -11,8 +11,8 @@ logging.basicConfig(
 )
 
 # API keys
-TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')  # Telegram bot token
-OPENAI_KEY = os.getenv('OPENAI_API_KEY')  # OpenAI API key
+TELEGRAM_TOKEN = '7637325032:AAGQhgDBbPYEtqaod6iAuqHJu5Pfl2OaLo4'
+OPENAI_KEY = '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'
 
 openai.api_key = OPENAI_KEY
 
