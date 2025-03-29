@@ -1,5 +1,4 @@
 import requests
-import base64
 import logging
 from io import BytesIO
 from PIL import Image
@@ -15,19 +14,27 @@ logger = logging.getLogger(__name__)
 # Environment variables
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-IMGUR_CLIENT_ID = os.getenv("IMGUR_CLIENT_ID")
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
 
 # OpenAI Client
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ✅ Upload image to Imgur
-def upload_to_imgur(image_bytes):
-    url = "https://api.imgur.com/3/upload"
-    headers = {"Authorization": f"Client-ID {IMGUR_CLIENT_ID}"}
-    response = requests.post(url, headers=headers, files={"image": image_bytes})
+# ✅ Upload image to Cloudinary
+def upload_to_cloudinary(image_bytes):
+    url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload"
+    headers = {"Authorization": f"Basic {requests.auth._basic_auth_str(CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET)}"}
+    
+    files = {"file": image_bytes}
+    data = {"upload_preset": "ml_default"}  # Default upload preset
+
+    response = requests.post(url, headers=headers, files=files, data=data)
 
     if response.status_code == 200:
-        return response.json()["data"]["link"]
+        image_url = response.json().get("secure_url")
+        logger.info(f"Image uploaded successfully: {image_url}")
+        return image_url
     else:
         logger.error(f"Failed to upload image: {response.text}")
         return None
@@ -39,7 +46,7 @@ async def get_image_bytes(bot: Bot, file_id: str):
     image_bytes = BytesIO()
     await new_file.download_to_memory(image_bytes)
     image_bytes.seek(0)
-    return image_bytes.getvalue()
+    return image_bytes
 
 
 # ✅ Transform image with GPT-4o
@@ -60,7 +67,7 @@ async def transform_image(image_url: str) -> str:
             max_tokens=1000
         )
 
-        # Extract response
+        # Extract transformed image URL
         if response and response.choices:
             transformed_image_url = response.choices[0].message.content
             return transformed_image_url
@@ -76,19 +83,19 @@ async def transform_image(image_url: str) -> str:
 # ✅ Handle photo messages
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle incoming photo messages."""
-    photo = update.message.photo[-1]  # Get the highest quality image
+    photo = update.message.photo[-1]  # Get highest quality image
     image_bytes = await get_image_bytes(context.bot, photo.file_id)
 
-    # Upload image to Imgur
-    imgur_url = upload_to_imgur(image_bytes)
-    if not imgur_url:
+    # Upload image to Cloudinary
+    image_url = upload_to_cloudinary(image_bytes)
+    if not image_url:
         await update.message.reply_text("Failed to upload the image.")
         return
 
     await update.message.reply_text("Image uploaded. Processing...")
 
     # Transform the image
-    transformed_url = await transform_image(imgur_url)
+    transformed_url = await transform_image(image_url)
 
     if transformed_url:
         await update.message.reply_photo(photo=transformed_url)
