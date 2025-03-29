@@ -1,57 +1,86 @@
-from telegram import Bot, Update
-from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
-import openai
-import logging
 import os
+import logging
+from io import BytesIO
+from PIL import Image
+import requests
+from telegram import Update
+from telegram.ext import Application, CommandHandler, MessageHandler, filters, CallbackContext
+import openai
 
-# Logging to track errors
-logging.basicConfig(
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    level=logging.INFO
-)
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# API keys
-TELEGRAM_TOKEN = '7637325032:AAGQhgDBbPYEtqaod6iAuqHJu5Pfl2OaLo4'
-OPENAI_KEY = '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'
+# Retrieve API keys from environment variables
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+OPENAI_API_KEY = os.getenv('OPENAI_API_KEY')
 
-openai.api_key = OPENAI_KEY
+# Initialize OpenAI API
+openai.api_key = OPENAI_API_KEY
 
-# Error handling function
-def error(update: Update, context: CallbackContext):
-    logging.warning(f'Update {update} caused error {context.error}')
-    update.message.reply_text("⚠️ Error ho gaya. Please thodi der baad try kariye!")
+async def start(update: Update, context: CallbackContext) -> None:
+    """Send a welcome message when the /start command is issued."""
+    await update.message.reply_text(
+        "Welcome! Send me a photo, and I'll transform it into a Studio Ghibli-style image."
+    )
 
-# Message handler
-def handle_message(update: Update, context: CallbackContext) -> None:
-    user_message = update.message.text
+async def handle_photo(update: Update, context: CallbackContext) -> None:
+    """Handle incoming photos from users."""
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    image_stream = BytesIO()
+    await file.download_to_memory(image_stream)
+    image_stream.seek(0)
 
+    # Process the image
+    transformed_image_stream = await transform_image(image_stream)
+
+    if transformed_image_stream:
+        # Send the transformed image back to the user
+        transformed_image_stream.seek(0)
+        await update.message.reply_photo(photo=transformed_image_stream)
+    else:
+        await update.message.reply_text("Sorry, I couldn't process the image.")
+
+async def transform_image(image_stream: BytesIO) -> BytesIO:
+    """Transform the image using OpenAI's API to achieve a Studio Ghibli style."""
     try:
-        # OpenAI se response lena
-        response = openai.ChatCompletion.create(
-            model="gpt-4o",
-            messages=[{"role": "user", "content": user_message}]
+        # Prepare the image for OpenAI API
+        image = Image.open(image_stream)
+        buffered = BytesIO()
+        image.save(buffered, format="PNG")
+        buffered.seek(0)
+
+        # Call OpenAI API for image transformation
+        response = openai.Image.create_variation(
+            image=buffered,
+            n=1,
+            size="1024x1024"
         )
-        ai_reply = response['choices'][0]['message']['content']
-        
-        # Bot reply karega
-        update.message.reply_text(ai_reply)
+
+        # Retrieve the transformed image URL
+        transformed_image_url = response['data'][0]['url']
+
+        # Download the transformed image
+        transformed_image_response = requests.get(transformed_image_url)
+        transformed_image_stream = BytesIO(transformed_image_response.content)
+
+        return transformed_image_stream
 
     except Exception as e:
-        logging.error(f"Error: {e}")
-        update.message.reply_text("⚠️ Koi error ho gaya. Please thoda wait kariye!")
+        logger.error(f"Error during image transformation: {e}")
+        return None
 
-# Main function
-def main():
-    updater = Updater(TELEGRAM_TOKEN)
-    dp = updater.dispatcher
+def main() -> None:
+    """Start the bot."""
+    application = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
-    dp.add_error_handler(error)
+    # Register handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(filters.PHOTO, handle_photo))
 
-    # Start the bot
-    updater.start_polling()
-    logging.info("Bot started...")
-    updater.idle()
+    # Run the bot
+    application.run_polling()
 
 if __name__ == '__main__':
     main()
