@@ -1,93 +1,199 @@
-import os import logging import requests from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, ContextTypes, CallbackQueryHandler, filters from openai import OpenAI from datetime import datetime, timedelta from io import BytesIO
+import os
+import logging
+import requests
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler, ContextTypes, filters
+from openai import OpenAI
+from io import BytesIO
+from datetime import datetime, timedelta
+import json
 
-✅ Logger
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-logging.basicConfig(level=logging.INFO) logger = logging.getLogger(name)
-
-✅ Environment Variables
-
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME") CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY") CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET") CLOUDINARY_UPLOAD_PRESET = "ml_default"
-
-✅ OpenAI Client
+TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+CLOUDINARY_CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUDINARY_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUDINARY_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+CLOUDINARY_UPLOAD_PRESET = "ml_default"
+ADMIN_USERNAME = "@wev999"
 
 client = OpenAI(api_key=OPENAI_API_KEY)
 
-✅ User Data Storage
+user_data_file = "user_data.json"
 
-users = {} admin_username = "@wev999"
+def load_user_data():
+    if not os.path.exists(user_data_file):
+        with open(user_data_file, "w") as f:
+            json.dump({}, f)
+    with open(user_data_file, "r") as f:
+        return json.load(f)
 
-✅ Helper Functions
+def save_user_data(data):
+    with open(user_data_file, "w") as f:
+        json.dump(data, f)
 
-def upload_to_cloudinary(image_bytes): """Uploads image to Cloudinary and returns the URL""" url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload" files = {'file': image_bytes} data = {"upload_preset": CLOUDINARY_UPLOAD_PRESET}
+user_data = load_user_data()
 
-response = requests.post(url, files=files, data=data)
-if response.status_code == 200:
-    image_url = response.json().get("secure_url")
-    logger.info(f"Image uploaded: {image_url}")
-    return image_url
-else:
-    logger.error(f"Failed to upload image: {response.text}")
-    return None
+def upload_to_cloudinary(image_bytes):
+    url = f"https://api.cloudinary.com/v1_1/{CLOUDINARY_CLOUD_NAME}/image/upload"
+    files = {'file': image_bytes}
+    data = {"upload_preset": CLOUDINARY_UPLOAD_PRESET}
+    try:
+        response = requests.post(url, files=files, data=data)
+        if response.status_code == 200:
+            return response.json().get("secure_url")
+        return None
+    except Exception as e:
+        logger.error(f"Cloudinary upload error: {e}")
+        return None
 
-def check_premium(user_id): """Check if user has premium membership""" return users.get(user_id, {}).get('premium', False)
+async def generate_image(prompt, image_url=None):
+    try:
+        content = [{"type": "text", "text": prompt}]
+        if image_url:
+            content.append({"type": "image_url", "image_url": {"url": image_url}})
+        response = client.images.generate(model="dall-e-3", prompt=prompt, n=1, size="1024x1024")
+        return response.data[0].url
+    except Exception as e:
+        logger.error(f"Image generation error: {e}")
+        return None
 
-def add_points(user_id, points=1): """Add points to user""" if user_id not in users: users[user_id] = {'points': 2, 'referrals': 0, 'premium': False} users[user_id]['points'] += points
+async def generate_code(prompt):
+    try:
+        response = client.completions.create(model="gpt-4o", prompt=prompt, max_tokens=1024)
+        return response.choices[0].text
+    except Exception as e:
+        logger.error(f"Code generation error: {e}")
+        return None
 
-def deduct_points(user_id, points=1): """Deduct points from user""" users[user_id]['points'] -= points
+async def chat_with_gpt(prompt):
+    try:
+        response = client.completions.create(model="gpt-4o", prompt=prompt, max_tokens=1024)
+        return response.choices[0].text
+    except Exception as e:
+        logger.error(f"Chat error: {e}")
+        return None
 
-def has_sufficient_points(user_id): """Check if user has enough points or premium""" return check_premium(user_id) or users[user_id]['points'] > 0
+def update_user_points(user_id, points):
+    if user_id not in user_data:
+        user_data[user_id] = {"points": 2, "last_free_reset": str(datetime.utcnow()), "is_premium": False, "referrals": []}
+    user_data[user_id]["points"] += points
+    save_user_data(user_data)
 
-def generate_inline_keyboard(): """Generate mode selection buttons""" keyboard = [ [InlineKeyboardButton("🖼️ Image-to-Image", callback_data="image_to_image")], [InlineKeyboardButton("📝 Text-to-Image", callback_data="text_to_image")], [InlineKeyboardButton("💬 Chat Mode", callback_data="chat_mode")], [InlineKeyboardButton("💻 Code Generator", callback_data="code_mode")], [InlineKeyboardButton("❌ Exit", callback_data="exit")] ] return InlineKeyboardMarkup(keyboard)
+def deduct_user_points(user_id):
+    if user_id in user_data:
+        user_data[user_id]["points"] -= 1
+        save_user_data(user_data)
 
-✅ Commands
+def check_free_daily_reset(user_id):
+    if user_id not in user_data:
+        user_data[user_id] = {"points": 2, "last_free_reset": str(datetime.utcnow()), "is_premium": False, "referrals": []}
+    last_reset = datetime.fromisoformat(user_data[user_id]["last_free_reset"])
+    if datetime.utcnow() - last_reset > timedelta(days=1):
+        user_data[user_id]["points"] = 2
+        user_data[user_id]["last_free_reset"] = str(datetime.utcnow())
+        save_user_data(user_data)
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE): user_id = update.effective_user.id if user_id not in users: users[user_id] = {'points': 2, 'referrals': 0, 'premium': False} await update.message.reply_text( "👋 Welcome! You have 2 free images per day. Refer a friend to earn 1 point per referral.\n" "Use the buttons below to choose a mode.", reply_markup=generate_inline_keyboard() )
+def has_premium(user_id):
+    return user_data.get(user_id, {}).get("is_premium", False)
 
-async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE): user_id = update.effective_user.id ref_code = f"/start {user_id}" await update.message.reply_text(f"🎯 Share this referral link: {ref_code}")
+def has_enough_points(user_id):
+    return user_data.get(user_id, {}).get("points", 0) > 0 or has_premium(user_id)
 
-async def add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE): if update.effective_user.username == admin_username[1:]: user_id = int(context.args[0]) users[user_id]['premium'] = True await update.message.reply_text(f"✅ User {user_id} has been granted premium membership.") else: await update.message.reply_text("❌ You are not authorized.")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    check_free_daily_reset(user_id)
+    await update.message.reply_text("🎉 Welcome! Choose a mode:", reply_markup=mode_buttons())
 
-✅ Mode Handlers
+async def refer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if len(context.args) == 1:
+        referrer_id = context.args[0]
+        if referrer_id != user_id and referrer_id in user_data and user_id not in user_data[referrer_id]["referrals"]:
+            user_data[referrer_id]["referrals"].append(user_id)
+            update_user_points(referrer_id, 1)
+            await update.message.reply_text(f"✅ You have been referred by {referrer_id}.")
+        else:
+            await update.message.reply_text("❌ Invalid or duplicate referral.")
+    else:
+        await update.message.reply_text(f"🔗 Share this link: `https://t.me/{context.bot.username}?start={user_id}`")
 
-async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE): user_id = update.effective_user.id if not has_sufficient_points(user_id): await update.message.reply_text(f"❌ You don't have enough points. Contact {admin_username} for premium.") return
+async def handle_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    check_free_daily_reset(user_id)
+    if not has_enough_points(user_id):
+        await update.message.reply_text(f"❌ You need more points. Contact admin {ADMIN_USERNAME} to buy membership.")
+        return
+    photo = update.message.photo[-1]
+    file = await context.bot.get_file(photo.file_id)
+    image_bytes = BytesIO()
+    await file.download_to_memory(image_bytes)
+    image_bytes.seek(0)
+    image_url = upload_to_cloudinary(image_bytes)
+    if image_url:
+        deduct_user_points(user_id)
+        await update.message.reply_text("🔥 Send me your modification prompt!")
+        context.user_data["image_url"] = image_url
+    else:
+        await update.message.reply_text("❌ Failed to upload image.")
 
-photo = update.message.photo[-1]
-file = await context.bot.get_file(photo.file_id)
-image_bytes = BytesIO()
-await file.download_to_memory(image_bytes)
-image_bytes.seek(0)
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    if "image_url" in context.user_data:
+        image_url = context.user_data.pop("image_url")
+        await update.message.reply_text("⏳ Generating modified image...")
+        result = await generate_image(update.message.text, image_url)
+        if result:
+            await update.message.reply_photo(result, caption="✅ Modified image.")
+        else:
+            await update.message.reply_text("❌ Failed to modify image.")
+    else:
+        result = await chat_with_gpt(update.message.text)
+        await update.message.reply_text(result or "❌ Failed to respond.")
 
-image_url = upload_to_cloudinary(image_bytes)
-if not image_url:
-    await update.message.reply_text("❌ Failed to upload image.")
-    return
+async def text_to_image(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = str(update.effective_user.id)
+    check_free_daily_reset(user_id)
+    if not has_enough_points(user_id):
+        await update.message.reply_text(f"❌ You need more points. Contact admin {ADMIN_USERNAME}.")
+        return
+    prompt = " ".join(context.args)
+    await update.message.reply_text("⏳ Generating image...")
+    result = await generate_image(prompt)
+    if result:
+        deduct_user_points(user_id)
+        await update.message.reply_photo(result, caption="✅ Here is your image.")
+    else:
+        await update.message.reply_text("❌ Failed to generate image.")
 
-deduct_points(user_id)
-await update.message.reply_text(f"✅ Image uploaded: {image_url}")
-await update.message.reply_text("✨ Would you like to modify this image or generate another?", reply_markup=generate_inline_keyboard())
+async def code_generator(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("💻 Send me the prompt for the code.")
+    context.user_data["mode"] = "code"
 
-async def chat_mode(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("💬 Chat mode activated. Send me a message.")
+async def handle_code_prompt(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    result = await generate_code(update.message.text)
+    await update.message.reply_text(f"🛠️ Code: \n```\n{result or '❌ Failed to generate code.'}\n```", parse_mode="Markdown")
 
-async def text_to_image(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("📝 Send me the text prompt for the image you want to generate!")
+async def admin_add_premium(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.username == ADMIN_USERNAME.lstrip("@"):
+        user_id = context.args[0]
+        if user_id in user_data:
+            user_data[user_id]["is_premium"] = True
+            save_user_data(user_data)
+            await update.message.reply_text(f"✅ User {user_id} now has premium access.")
+        else:
+            await update.message.reply_text("❌ Invalid user ID.")
 
-async def code_mode(update: Update, context: ContextTypes.DEFAULT_TYPE): await update.message.reply_text("💻 Code generator mode activated. Send your request!")
+def mode_buttons():
+    return InlineKeyboardMarkup([[InlineKeyboardButton("🖼️ Image Mode", callback_data="image")], [InlineKeyboardButton("💬 Chat Mode", callback_data="chat")], [InlineKeyboardButton("💻 Code Mode", callback_data="code")]])
 
-✅ Inline Callback Handler
+def main():
+    app = ApplicationBuilder().token(TOKEN).build()
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("refer", refer))
+    app.run_polling()
 
-async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE): query = update.callback_query await query.answer() if query.data == "image_to_image": await text_to_image(query, context) elif query.data == "text_to_image": await text_to_image(query, context) elif query.data == "chat_mode": await chat_mode(query, context) elif query.data == "code_mode": await code_mode(query, context) elif query.data == "exit": await query.edit_message_text("👋 Exiting. Use /start to restart.")
-
-✅ Main Function
-
-def main(): app = ApplicationBuilder().token(TOKEN).build()
-
-app.add_handler(CommandHandler("start", start))
-app.add_handler(CommandHandler("refer", refer))
-app.add_handler(CommandHandler("add_premium", add_premium))
-app.add_handler(MessageHandler(filters.PHOTO, handle_image))
-app.add_handler(CallbackQueryHandler(button_callback))
-
-logger.info("Bot started...")
-app.run_polling()
-
-if name == "main": main()
-
+if __name__ == "__main__":
+    main()
